@@ -37,18 +37,19 @@
 end
 
 @inline function __extract_lcons_ucons(
-        prob::AbstractBVProblem, ::Type{T}, M, N, bcresid_prototype, f_prototype
+        prob::AbstractBVProblem, ::Type{T}, M, N, bcresid_prototype, equality_prototype, f_prototype
     ) where {T}
     L_f_prototype = length(f_prototype)
     L_bcresid_prototype = length(bcresid_prototype)
+    L_equality_prototype = isnothing(equality_prototype) ? 0 : length(equality_prototype)
     lcons = if isnothing(prob.lcons)
-        zeros(T, L_bcresid_prototype + (N - 1) * L_f_prototype)
+        zeros(T, L_bcresid_prototype + (N - 1) * L_f_prototype + N * L_equality_prototype)
     else
         lcons_length = length(prob.lcons)
         vcat(prob.lcons, zeros(T, N * M - lcons_length))
     end
     ucons = if isnothing(prob.ucons)
-        zeros(T, L_bcresid_prototype + (N - 1) * L_f_prototype)
+        zeros(T, L_bcresid_prototype + (N - 1) * L_f_prototype + N * L_equality_prototype)
     else
         ucons_length = length(prob.ucons)
         vcat(prob.ucons, zeros(T, N * M - ucons_length))
@@ -57,7 +58,7 @@ end
 end
 
 @inline function __extract_lcons_ucons(
-        prob::AbstractBVProblem, ::Type{T}, M, N, bcresid_prototype, ::Nothing
+        prob::AbstractBVProblem, ::Type{T}, M, N, bcresid_prototype, ::Nothing, ::Nothing
     ) where {T}
     lcons = zeros(T, N * M)
     ucons = zeros(T, N * M)
@@ -108,7 +109,7 @@ selected algorithm. Depending on the formulation, it returns either a `Nonlinear
 """
 function __construct_internal_problem(
         prob, pt::StandardBVProblem, alg, loss, jac, jac_prototype, resid_prototype,
-        bcresid_prototype, f_prototype, y, p, M::Int, N::Int, cost_fun
+        bcresid_prototype, equality_prototype, f_prototype, y, p, M::Int, N::Int, cost_fun
     )
     T = eltype(y)
     iip = SciMLBase.isinplace(prob)
@@ -129,7 +130,7 @@ function __construct_internal_problem(
             cons_j = jac,
             cons_jac_prototype = sparse(jac_prototype)
         )
-        lcons, ucons = __extract_lcons_ucons(prob, T, M, N, bcresid_prototype, f_prototype)
+        lcons, ucons = __extract_lcons_ucons(prob, T, M, N, bcresid_prototype, equality_prototype, f_prototype)
         lb, ub = __extract_lb_ub(prob, T, M, N)
 
         return __internal_optimization_problem(
@@ -140,7 +141,7 @@ end
 
 function __construct_internal_problem(
         prob, pt::TwoPointBVProblem, alg, loss, jac, jac_prototype, resid_prototype,
-        bcresid_prototype, f_prototype, y, p, M::Int, N::Int, cost_fun
+        bcresid_prototype, equality_prototype, f_prototype, y, p, M::Int, N::Int, cost_fun
     )
     T = eltype(y)
     iip = SciMLBase.isinplace(prob)
@@ -161,7 +162,7 @@ function __construct_internal_problem(
             cons_j = jac,
             cons_jac_prototype = sparse(jac_prototype)
         )
-        lcons, ucons = __extract_lcons_ucons(prob, T, M, N, bcresid_prototype, f_prototype)
+        lcons, ucons = __extract_lcons_ucons(prob, T, M, N, bcresid_prototype, equality_prototype, f_prototype)
         lb, ub = __extract_lb_ub(prob, T, M, N)
 
         return __internal_optimization_problem(

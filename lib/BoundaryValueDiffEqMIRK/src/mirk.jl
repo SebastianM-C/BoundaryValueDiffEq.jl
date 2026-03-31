@@ -6,6 +6,7 @@
     in_size
     f
     bc
+    equality
     prob                       # BVProblem
     problem_type               # StandardBVProblem
     p                          # Parameters
@@ -14,6 +15,7 @@
     ITU                        # MIRK Interpolation Tableau
     f_prototype
     bcresid_prototype
+    equality_prototype
     # Everything below gets resized in adaptive methods
     mesh                       # Discrete mesh
     mesh_dt                    # Step size
@@ -94,6 +96,7 @@ function SciMLBase.__init(
     end
 
     bcresid_prototype, resid₁_size = __get_bcresid_prototype(prob.problem_type, prob, X)
+    equality_prototype = prob.f.equality_prototype
 
     residual = if iip
         if !constraint
@@ -229,8 +232,8 @@ function SciMLBase.__init(
     prob_ = !(prob.u0 isa AbstractArray) ? remake(prob; u0 = X) : prob
 
     return MIRKCache{iip, T, use_both, typeof(diffcache), tune_parameters}(
-        alg_order(alg), stage, N, size(X), f, bc, prob_, prob.problem_type, prob.p, alg,
-        TU, ITU, f_prototype, bcresid_prototype, mesh, mesh_dt, k_discrete, k_interp, y,
+        alg_order(alg), stage, N, size(X), f, bc, prob.f.equality, prob_, prob.problem_type, prob.p, alg,
+        TU, ITU, f_prototype, bcresid_prototype, equality_prototype, mesh, mesh_dt, k_discrete, k_interp, y,
         y₀, residual, fᵢ_cache, fᵢ₂_cache, errors, new_stages, resid₁_size, prob.singular_term
         , nlsolve_kwargs, optimize_kwargs, (; abstol, dt, adaptive, controller, tune_parameters, kwargs...), verbose_spec
     )
@@ -428,7 +431,7 @@ function __construct_problem(
             p,
         ) -> __mirk_loss!(
             du, u, p, cache.y, pt, cache.bc, cache.residual,
-            cache.bcresid_prototype, cache.mesh, cache, eval_sol, trait, constraint
+            cache.f_prototype, cache.bcresid_prototype, cache.equality_prototype, cache.mesh, cache, eval_sol, trait, constraint
         )
     end
 
@@ -463,13 +466,21 @@ end
 # loss function for optimization based solvers
 @views function __mirk_loss!(
         resid, u, p, y, pt::StandardBVProblem, bc!::BC, residual,
-        bcresid_prototype, mesh, cache, _, trait, constraint
+        f_prototype, bcresid_prototype, equality_prototype, mesh, cache, _, trait, constraint
     ) where {BC}
     bcresid = length(bcresid_prototype)
+    N = length(cache.mesh)
+    L_f_prototype = isnothing(f_prototype) ? cache.M : length(f_prototype)
+    n_collocation = (N-1) * L_f_prototype
     __mirk_loss_bc!(resid[1:bcresid], u, p, pt, bc!, y, mesh, cache, trait)
     __mirk_loss_collocation!(
-        resid[(bcresid + 1):end], u, p, y, mesh, residual, cache, trait, constraint
+        resid[(bcresid + 1):(bcresid + n_collocation)], u, p, y, mesh, residual, cache, trait, constraint
     )
+    if !isnothing(equality_prototype)
+        __mirk_loss_equality!(
+            resid[(bcresid + n_collocation + 1):end], u, p, y, mesh, cache
+        )
+    end
     return nothing
 end
 
@@ -503,7 +514,7 @@ end
 # loss function for optimization based solvers
 @views function __mirk_loss!(
         resid, u, p, y, pt::TwoPointBVProblem, bc!::Tuple{BC1, BC2}, residual,
-        bcresid_prototype, mesh, cache, _, trait, constraint
+        f_prototype, bcresid_prototype, equality_prototype, mesh, cache, _, trait, constraint
     ) where {BC1, BC2}
     __mirk_loss!(resid, u, p, y, pt, bc!, residual, mesh, cache, nothing, trait, constraint)
     return nothing
@@ -572,19 +583,32 @@ end
     return mapreduce(vec, vcat, resids)
 end
 
+@views function __mirk_loss_equality!(resid, u, p, y, mesh, cache)
+    y_ = recursive_unflatten!(y, u)
+    L_equality_prototype = length(cache.equality_prototype)
+
+    for i in eachindex(mesh)
+        idx = ((i-1)*L_equality_prototype+1):(i*L_equality_prototype)
+        cache.equality(resid[idx], y_[:, i], p, mesh[i])
+    end
+    return nothing
+end
+
 function __construct_problem(
         cache::MIRKCache{iip, T, UB, DC, tune_parameters}, y, loss_bc::BC, loss_collocation::C, loss::LF,
         ::StandardBVProblem, constraint::Val{true}
     ) where {iip, T, UB, DC, tune_parameters, BC, C, LF}
     (; jac_alg) = cache.alg
-    (; f_prototype, bcresid_prototype, prob) = cache
+    (; f_prototype, bcresid_prototype, equality_prototype, prob) = cache
     (; bc_diffmode) = jac_alg
     N = length(cache.mesh)
 
     resid_bc = bcresid_prototype
     L = length(resid_bc)
     L_f_prototype = length(f_prototype)
+    n_eq = isnothing(equality_prototype) ? 0 : length(equality_prototype)
     resid_collocation = safe_similar(y, L_f_prototype * (N - 1))
+    resid_equality = safe_similar(y, n_eq * N)
 
     cache_bc = if iip
         DI.prepare_jacobian(loss_bc, resid_bc, bc_diffmode, y, Constant(cache.p))
@@ -646,10 +670,10 @@ function __construct_problem(
         tune_parameters, p = cache.p
     )
 
-    resid_prototype = vcat(resid_bc, resid_collocation)
+    resid_prototype = vcat(resid_bc, resid_collocation, resid_equality)
     return __construct_internal_problem(
         prob, cache.problem_type, cache.alg, loss, jac, jac_prototype, resid_prototype,
-        bcresid_prototype, f_prototype, y, cache.p, cache.M, N, cost_fun
+        bcresid_prototype, equality_prototype, f_prototype, y, cache.p, cache.M, N, cost_fun
     )
 end
 
@@ -659,7 +683,7 @@ function __construct_problem(
         ::StandardBVProblem, constraint::Val{false}
     ) where {iip, T, UB, DC, tune_parameters, BC, C, LF}
     (; jac_alg) = cache.alg
-    (; f_prototype, bcresid_prototype, prob) = cache
+    (; f_prototype, bcresid_prototype, equality_prototype, prob) = cache
     (; bc_diffmode) = jac_alg
     N = length(cache.mesh)
 
@@ -756,7 +780,7 @@ function __construct_problem(
 
     return __construct_internal_problem(
         prob, cache.problem_type, cache.alg, loss, jac, jac_prototype, resid_prototype,
-        bcresid_prototype, f_prototype, y, cache.p, cache.M, N, cost_fun
+        bcresid_prototype, equality_prototype, f_prototype, y, cache.p, cache.M, N, cost_fun
     )
 end
 
@@ -819,7 +843,7 @@ function __construct_problem(
         ::TwoPointBVProblem, constraint::Val{true}
     ) where {iip, T, UB, DC, tune_parameters, BC, C, LF}
     (; jac_alg) = cache.alg
-    (; f_prototype, bcresid_prototype, prob) = cache
+    (; f_prototype, bcresid_prototype, equality_prototype, prob) = cache
     N = length(cache.mesh)
     L_f_prototype = length(f_prototype)
 
@@ -869,7 +893,7 @@ function __construct_problem(
     resid_prototype = copy(resid)
     return __construct_internal_problem(
         prob, cache.problem_type, cache.alg, loss, jac, jac_prototype, resid_prototype,
-        bcresid_prototype, f_prototype, y, cache.p, cache.M, N, cost_fun
+        bcresid_prototype, equality_prototype, f_prototype, y, cache.p, cache.M, N, cost_fun
     )
 end
 
@@ -878,7 +902,7 @@ function __construct_problem(
         ::TwoPointBVProblem, constraint::Val{false}
     ) where {iip, T, UB, DC, tune_parameters, BC, C, LF}
     (; jac_alg) = cache.alg
-    (; f_prototype, bcresid_prototype, prob) = cache
+    (; f_prototype, bcresid_prototype, equality_prototype, prob) = cache
     N = length(cache.mesh)
 
     resid = vcat(
@@ -932,7 +956,7 @@ function __construct_problem(
     resid_prototype = copy(resid)
     return __construct_internal_problem(
         cache.prob, cache.problem_type, cache.alg, loss, jac, jac_prototype,
-        resid_prototype, bcresid_prototype, f_prototype, y, cache.p, cache.M, N, cost_fun
+        resid_prototype, bcresid_prototype, equality_prototype, f_prototype, y, cache.p, cache.M, N, cost_fun
     )
 end
 
