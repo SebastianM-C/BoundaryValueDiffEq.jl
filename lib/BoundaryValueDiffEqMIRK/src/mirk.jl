@@ -5,6 +5,7 @@
     M::Int                     # The number of equations
     in_size
     f
+    mass_matrix
     bc
     equality
     prob                       # BVProblem
@@ -232,7 +233,7 @@ function SciMLBase.__init(
     prob_ = !(prob.u0 isa AbstractArray) ? remake(prob; u0 = X) : prob
 
     return MIRKCache{iip, T, use_both, typeof(diffcache), tune_parameters}(
-        alg_order(alg), stage, N, size(X), f, bc, prob.f.equality, prob_, prob.problem_type, prob.p, alg,
+        alg_order(alg), stage, N, size(X), f, prob.f.mass_matrix, bc, prob.f.equality, prob_, prob.problem_type, prob.p, alg,
         TU, ITU, f_prototype, bcresid_prototype, equality_prototype, mesh, mesh_dt, k_discrete, k_interp, y,
         y₀, residual, fᵢ_cache, fᵢ₂_cache, errors, new_stages, resid₁_size, prob.singular_term
         , nlsolve_kwargs, optimize_kwargs, (; abstol, dt, adaptive, controller, tune_parameters, kwargs...), verbose_spec
@@ -591,6 +592,18 @@ end
         idx = ((i-1)*L_equality_prototype+1):(i*L_equality_prototype)
         cache.equality(resid[idx], y_[:, i], p, mesh[i])
     end
+    return nothing
+end
+
+function __apply_mass_matrix!(residᵢ, mass_matrix::UniformScaling, tmp)
+    # Identity matrix - no modification needed
+    return nothing
+end
+
+function __apply_mass_matrix!(residᵢ, mass_matrix::AbstractMatrix, tmp)
+    # Apply M * residᵢ, using tmp as workspace
+    mul!(tmp, mass_matrix, residᵢ)
+    copyto!(residᵢ, tmp)
     return nothing
 end
 
